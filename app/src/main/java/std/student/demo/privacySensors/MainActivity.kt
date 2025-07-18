@@ -3,6 +3,7 @@ package std.student.demo.privacySensors
 import android.Manifest.permission.RECORD_AUDIO
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager.PERMISSION_GRANTED
 import android.media.AudioFormat
 import android.media.AudioManager
@@ -10,9 +11,11 @@ import android.media.AudioRecord
 import android.media.AudioRecordingConfiguration
 import android.media.MediaRecorder
 import android.os.Process
+import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -32,6 +35,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Icon
@@ -631,6 +635,13 @@ class MainActivity : ComponentActivity() {
         setupRecordingCallback() // still catch external recording configurations
     }
 
+    private fun openAppSettings() {
+        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+            data = Uri.fromParts("package", packageName, null)
+        }
+        startActivity(intent)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
@@ -652,7 +663,8 @@ class MainActivity : ComponentActivity() {
                         audioSystemMonitor = audioSystemMonitor,
                         modifier = Modifier
                             .padding(innerPadding)
-                            .fillMaxSize()
+                            .fillMaxSize(),
+                        onOpenPermissionsMenu = { openAppSettings() }
                     )
                 }
             }
@@ -683,7 +695,8 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun RecordingMonitorScreen(
     audioSystemMonitor: AudioSystemMonitor,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onOpenPermissionsMenu: () -> Unit
 ) {
     val context = LocalContext.current
     val audioSystemState by audioSystemMonitor.observeAudioSystemState().collectAsState(
@@ -701,7 +714,10 @@ fun RecordingMonitorScreen(
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         // System Status Card
-        SystemStatusCard(audioSystemState = audioSystemState)
+        SystemStatusCard(
+            audioSystemState = audioSystemState,
+            onOpenPermissionsMenu = onOpenPermissionsMenu
+        )
 
         Spacer(modifier = Modifier.height(16.dp))
 
@@ -747,14 +763,35 @@ fun RecordingMonitorScreen(
 }
 
 @Composable
-fun SystemStatusCard(audioSystemState: AudioSystemState) {
+fun SystemStatusCard(
+    audioSystemState: AudioSystemState,
+    onOpenPermissionsMenu: () -> Unit
+) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text(
-                text = "System Status",
-                style = MaterialTheme.typography.titleMedium
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "System Status",
+                    style = MaterialTheme.typography.titleMedium
+                )
+                IconButton(
+                    onClick = onOpenPermissionsMenu,
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Settings,
+                        contentDescription = "Open app settings",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
             Spacer(modifier = Modifier.height(8.dp))
+
             Text(audioSystemState.audioMode)
             Text(audioSystemState.clientSilencedStatus)
             Text(audioSystemState.ownedRecordingsStatus)
