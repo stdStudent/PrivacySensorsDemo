@@ -5,18 +5,22 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager.PERMISSION_GRANTED
+import android.hardware.SensorPrivacyManager
+import android.hardware.SensorPrivacyManager.Sensors
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioRecordingConfiguration
 import android.media.MediaRecorder
-import android.os.Process
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.Process
 import android.provider.Settings
 import android.util.Log
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -33,7 +37,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
@@ -53,10 +59,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import compose.icons.LineAwesomeIcons
+import compose.icons.lineawesomeicons.Android
+import compose.icons.lineawesomeicons.MicrochipSolid
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
@@ -617,6 +628,87 @@ class AudioRecordManager {
     }
 }
 
+// Sensors
+class PrivacySensors(context: Context) {
+    init {
+        val status = HiddenApiBypass.setHiddenApiExemptions("Landroid/hardware/SensorPrivacyManager;")
+        Logger.system("SPM API exemption status: " + if (status) "OK" else "Error")
+    }
+
+    private val sensorPrivacyManager =
+        context.getSystemService(SensorPrivacyManager::class.java) as SensorPrivacyManager
+
+    sealed class MicTogglePresent {
+        data object HARDWARE : MicTogglePresent()
+        data object SOFTWARE : MicTogglePresent()
+        data object ANY      : MicTogglePresent() // API < 33, fallback option
+    }
+
+    sealed class CamTogglePresent {
+        data object HARDWARE : CamTogglePresent()
+        data object SOFTWARE : CamTogglePresent()
+        data object ANY      : CamTogglePresent() // API < 33, fallback option
+    }
+
+    fun isMicrophoneSupported(): List<MicTogglePresent> {
+        if (Build.VERSION.SDK_INT < 33) {
+            val isSupported = sensorPrivacyManager.supportsSensorToggle(Sensors.MICROPHONE)
+            return if (isSupported) {
+                listOf(MicTogglePresent.ANY)
+            } else {
+                emptyList()
+            }
+        }
+
+        // For Android 13 and above, use the new API
+        val isHardwareSupported =
+            sensorPrivacyManager.supportsSensorToggle(
+                SensorPrivacyManager.TOGGLE_TYPE_HARDWARE,
+                Sensors.MICROPHONE
+            )
+
+        val isSoftwareSupported =
+            sensorPrivacyManager.supportsSensorToggle(
+                SensorPrivacyManager.TOGGLE_TYPE_SOFTWARE,
+                Sensors.MICROPHONE
+            )
+
+        return listOfNotNull(
+            if (isHardwareSupported) MicTogglePresent.HARDWARE else null,
+            if (isSoftwareSupported) MicTogglePresent.SOFTWARE else null
+        )
+    }
+
+    fun isCameraSupported(): List<CamTogglePresent> {
+        if (Build.VERSION.SDK_INT < 33) {
+            val isSupported = sensorPrivacyManager.supportsSensorToggle(Sensors.CAMERA)
+            return if (isSupported) {
+                listOf(CamTogglePresent.ANY)
+            } else {
+                emptyList()
+            }
+        }
+
+        // For Android 13 and above, use the new API
+        val isHardwareSupported =
+            sensorPrivacyManager.supportsSensorToggle(
+                SensorPrivacyManager.TOGGLE_TYPE_HARDWARE,
+                Sensors.CAMERA
+            )
+
+        val isSoftwareSupported =
+            sensorPrivacyManager.supportsSensorToggle(
+                SensorPrivacyManager.TOGGLE_TYPE_SOFTWARE,
+                Sensors.CAMERA
+            )
+
+        return listOfNotNull(
+            if (isHardwareSupported) CamTogglePresent.HARDWARE else null,
+            if (isSoftwareSupported) CamTogglePresent.SOFTWARE else null
+        )
+    }
+}
+
 // Main
 class MainActivity : ComponentActivity() {
     private lateinit var audioSystemMonitor: AudioSystemMonitor
@@ -709,6 +801,11 @@ fun RecordingMonitorScreen(
     var mediaRecorderState by remember { mutableStateOf(false) }
     var audioRecordState by remember { mutableStateOf(false) }
 
+    // PrivacySensors info
+    val privacySensors = remember { PrivacySensors(context) }
+    val micSupport = remember { privacySensors.isMicrophoneSupported() }
+    val camSupport = remember { privacySensors.isCameraSupported() }
+
     Column(
         modifier = modifier.padding(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally
@@ -716,7 +813,9 @@ fun RecordingMonitorScreen(
         // System Status Card
         SystemStatusCard(
             audioSystemState = audioSystemState,
-            onOpenPermissionsMenu = onOpenPermissionsMenu
+            onOpenPermissionsMenu = onOpenPermissionsMenu,
+            micSupport = micSupport,
+            camSupport = camSupport
         )
 
         Spacer(modifier = Modifier.height(16.dp))
@@ -765,8 +864,11 @@ fun RecordingMonitorScreen(
 @Composable
 fun SystemStatusCard(
     audioSystemState: AudioSystemState,
-    onOpenPermissionsMenu: () -> Unit
+    onOpenPermissionsMenu: () -> Unit,
+    micSupport: List<PrivacySensors.MicTogglePresent>,
+    camSupport: List<PrivacySensors.CamTogglePresent>
 ) {
+    val context = LocalContext.current
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(
@@ -790,11 +892,139 @@ fun SystemStatusCard(
                 }
             }
 
+            Spacer(modifier = Modifier.height(4.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Supported toggles:", style = MaterialTheme.typography.bodySmall)
+
+                PrivacySensorStatusIcon(
+                    label = "Mic",
+                    support = micSupport,
+                    toggleTypeIcons = mapOf(
+                        PrivacySensors.MicTogglePresent.HARDWARE to LineAwesomeIcons.MicrochipSolid,
+                        PrivacySensors.MicTogglePresent.SOFTWARE to LineAwesomeIcons.Android
+                    ),
+                    onClick = {
+                        val message = when {
+                            micSupport.isEmpty() ->
+                                "Microphone toggle not supported"
+
+                            micSupport.contains(PrivacySensors.MicTogglePresent.HARDWARE) && micSupport.contains(PrivacySensors.MicTogglePresent.SOFTWARE) ->
+                                "Microphone toggle: hardware & software supported"
+
+                            micSupport.contains(PrivacySensors.MicTogglePresent.HARDWARE) ->
+                                "Microphone toggle: hardware supported"
+
+                            micSupport.contains(PrivacySensors.MicTogglePresent.SOFTWARE) ->
+                                "Microphone toggle: software supported"
+
+                            micSupport.contains(PrivacySensors.MicTogglePresent.ANY) ->
+                                "Microphone toggle: supported (type unknown)"
+
+                            else ->
+                                "Microphone toggle: supported"
+                        }
+
+                        Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+                    }
+                )
+
+                PrivacySensorStatusIcon(
+                    label = "Cam",
+                    support = camSupport,
+                    toggleTypeIcons = mapOf(
+                        PrivacySensors.CamTogglePresent.HARDWARE to LineAwesomeIcons.MicrochipSolid,
+                        PrivacySensors.CamTogglePresent.SOFTWARE to LineAwesomeIcons.Android
+                    ),
+                    onClick = {
+                        val message = when {
+                            camSupport.isEmpty() ->
+                                "Camera toggle not supported"
+
+                            camSupport.contains(PrivacySensors.CamTogglePresent.HARDWARE) && camSupport.contains(PrivacySensors.CamTogglePresent.SOFTWARE) ->
+                                "Camera toggle: hardware & software supported"
+
+                            camSupport.contains(PrivacySensors.CamTogglePresent.HARDWARE) ->
+                                "Camera toggle: hardware supported"
+
+                            camSupport.contains(PrivacySensors.CamTogglePresent.SOFTWARE) ->
+                                "Camera toggle: software supported"
+
+                            camSupport.contains(PrivacySensors.CamTogglePresent.ANY) ->
+                                "Camera toggle: supported (type unknown)"
+
+                            else ->
+                                "Camera toggle: supported"
+                        }
+
+                        Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+                    }
+                )
+            }
+
             Spacer(modifier = Modifier.height(8.dp))
 
             Text(audioSystemState.audioMode)
             Text(audioSystemState.clientSilencedStatus)
             Text(audioSystemState.ownedRecordingsStatus)
+        }
+    }
+}
+
+// Compact icon row for sensor status
+@Composable
+fun <T> PrivacySensorStatusIcon(
+    label: String,
+    support: List<T>,
+    toggleTypeIcons: Map<T, ImageVector>,
+    onClick: () -> Unit
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Text(label, style = MaterialTheme.typography.bodySmall)
+        if (support.isEmpty()) {
+            IconButton(
+                onClick = onClick,
+                modifier = Modifier.size(18.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "$label toggle not supported",
+                    tint = Color.Red,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        } else {
+            IconButton(
+                onClick = onClick,
+                modifier = Modifier.size(18.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.CheckCircle,
+                    contentDescription = "$label toggle supported",
+                    tint = Color(0xFF4CAF50),
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+            support.forEach { type ->
+                Icon(
+                    imageVector = toggleTypeIcons[type] ?: Icons.Default.CheckCircle,
+                    contentDescription = when (type) {
+                        is PrivacySensors.MicTogglePresent.HARDWARE, is PrivacySensors.CamTogglePresent.HARDWARE -> "$label hardware toggle"
+                        is PrivacySensors.MicTogglePresent.SOFTWARE, is PrivacySensors.CamTogglePresent.SOFTWARE -> "$label software toggle"
+                        is PrivacySensors.MicTogglePresent.ANY,      is PrivacySensors.CamTogglePresent.ANY      -> "$label (any type) toggle"
+                        else -> "$label toggle"
+                    },
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(16.dp),
+                )
+            }
         }
     }
 }
