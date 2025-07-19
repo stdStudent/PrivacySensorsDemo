@@ -1,31 +1,54 @@
 package std.student.demo.privacySensors
 
+import android.Manifest.permission.CAMERA
 import android.Manifest.permission.RECORD_AUDIO
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager.PERMISSION_GRANTED
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.ImageFormat
+import android.graphics.SurfaceTexture
+import android.hardware.Camera
 import android.hardware.SensorPrivacyManager
 import android.hardware.SensorPrivacyManager.Sensors
+import android.hardware.camera2.CameraAccessException
+import android.hardware.camera2.CameraCaptureSession
+import android.hardware.camera2.CameraDevice
+import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.TotalCaptureResult
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioRecordingConfiguration
+import android.media.Image
+import android.media.ImageReader
 import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
 import android.os.Process
 import android.provider.Settings
+import android.renderscript.Allocation
+import android.renderscript.Element
+import android.renderscript.RenderScript
+import android.renderscript.ScriptIntrinsicYuvToRGB
+import android.renderscript.Type
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -34,6 +57,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -60,13 +84,19 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
 import compose.icons.LineAwesomeIcons
 import compose.icons.lineawesomeicons.Android
+import compose.icons.lineawesomeicons.CameraRetroSolid
+import compose.icons.lineawesomeicons.CameraSolid
+import compose.icons.lineawesomeicons.FilmSolid
+import compose.icons.lineawesomeicons.Image
 import compose.icons.lineawesomeicons.MicrochipSolid
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -74,6 +104,8 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import org.lsposed.hiddenapibypass.HiddenApiBypass
 import std.student.demo.privacySensors.ui.theme.DefaultTheme
+import java.io.File
+import java.io.FileOutputStream
 import java.lang.reflect.Executable
 import kotlin.io.path.createTempFile
 
@@ -138,6 +170,8 @@ object Logger {
     fun success(message: String) = log("+", message)
     fun mediaRecorder(message: String) = log("MR", message)
     fun audioRecord(message: String) = log("AR", message)
+    fun camera(message: String) = log("CAM", message)
+    fun camera2(message: String) = log("CAM2", message)
     fun system(message: String) = log("SYS", message)
     fun permission(message: String) = log("PERM", message)
     fun callback(message: String) = log("CB", message)
@@ -628,6 +662,375 @@ class AudioRecordManager {
     }
 }
 
+// Camera managers
+class Camera1Manager(context: Context) {
+    private val photoFile = File(context.filesDir, "camera1_photo.webp")
+
+    @SuppressLint("MissingPermission")
+    fun takePhoto(onPhotoTaken: () -> Unit): Boolean {
+        return try {
+            val numberOfCameras = Camera.getNumberOfCameras()
+            if (numberOfCameras == 0) {
+                Logger.camera("No cameras available")
+                return false
+            }
+
+            Logger.camera("Taking photo with Camera1 API")
+            val camera = Camera.open(0)
+
+            // Set up parameters for photo capture
+            val parameters = camera.parameters
+            parameters.setPictureFormat(ImageFormat.YUY2) // raw
+
+            // Set valid picture size, get smallest one
+            val pictureSizes = parameters.supportedPictureSizes
+            val smallestSize = pictureSizes.minByOrNull { it.width * it.height } ?: pictureSizes[0]
+            parameters.setPictureSize(smallestSize.width, smallestSize.height)
+
+
+            camera.parameters = parameters
+
+            // Create a dummy surface texture for preview
+            val surfaceTexture = SurfaceTexture(0)
+            camera.setPreviewTexture(surfaceTexture)
+            camera.startPreview()
+
+            camera.takePicture(null, null) { data, _ ->
+                try {
+                    if (data != null && data.isNotEmpty()) {
+                        // Convert data to Bitmap and save as raw bitmap
+                        val bitmap = BitmapFactory.decodeByteArray(data, 0, data.size)
+                        if (bitmap != null) {
+                            savePhotoFile(bitmap, photoFile)
+                            Logger.success("Camera1 API: Raw photo saved (${bitmap.width}x${bitmap.height})")
+                            onPhotoTaken()
+                        } else
+                            Logger.error("Camera1 API: Failed to decode photo data")
+                    } else
+                        Logger.error("Camera1 API: Photo data is null or empty (privacy toggle may be enabled)")
+                } catch (e: Exception) {
+                    Logger.error("Camera1 API: Failed to save photo: ${e.message}")
+                } finally {
+                    try {
+                        camera.stopPreview()
+                        camera.release()
+                        surfaceTexture.release()
+                    } catch (e: Exception) {
+                        Logger.error("Camera1 API: Error releasing camera: ${e.message}")
+                    }
+                }
+            }
+
+            true
+        } catch (e: RuntimeException) {
+            when (e.message) {
+                "Fail to connect to camera service" -> Logger.camera("Camera1 API: Failed to connect to camera service - possibly blocked")
+                else -> Logger.error("Camera1 API: ${e.message}")
+            }
+
+            false
+        } catch (e: Exception) {
+            Logger.error("Camera1 API: ${e.message}")
+            false
+        }
+    }
+
+    fun hasPhoto(): Boolean = photoFile.exists()
+
+    fun getPhotoBitmap(): Bitmap? = if (hasPhoto()) {
+        try {
+            BitmapFactory.decodeFile(photoFile.absolutePath)
+        } catch (e: Exception) {
+            Logger.error("Camera1 API: Failed to load photo: ${e.message}")
+            null
+        }
+    } else
+        null
+
+    fun deletePhoto() {
+        if (photoFile.exists()) {
+            photoFile.delete()
+            Logger.camera("Camera1 API: Photo deleted")
+        }
+    }
+}
+
+class Camera2Manager(private val context: Context) {
+    private val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+    private val photoFile = File(context.filesDir, "camera2_photo.webp")
+    private var backgroundThread: HandlerThread? = null
+    private var backgroundHandler: Handler? = null
+
+    @SuppressLint("MissingPermission")
+    fun takePhoto(onPhotoTaken: () -> Unit): Boolean {
+        return try {
+            startBackgroundThread()
+
+            val cameraIdList = cameraManager.cameraIdList
+            if (cameraIdList.isEmpty()) {
+                Logger.camera2("No cameras available")
+                return false
+            }
+
+            val cameraId = cameraIdList[0]
+            Logger.camera2("Taking photo with Camera2 API")
+
+            // Set up ImageReader for capturing YUV (raw) format
+            val reader = ImageReader.newInstance(640, 480, ImageFormat.YUV_420_888, 1)
+            reader.setOnImageAvailableListener({ rawImage ->
+                val image = rawImage.acquireLatestImage()
+                try {
+                    if (image != null) {
+                        // Convert YUV image to bitmap
+                        val bitmap = yuv420ToBitmap(image)
+                        if (bitmap != null) {
+                            savePhotoFile(bitmap, photoFile)
+                            Logger.success("Camera2 API: Raw photo saved (${bitmap.width}x${bitmap.height})")
+                            onPhotoTaken()
+                        } else
+                            Logger.error("Camera2 API: Failed to convert YUV to bitmap")
+                    } else
+                        Logger.error("Camera2 API: Image is null (privacy toggle may be enabled)")
+                } catch (e: Exception) {
+                    Logger.error("Camera2 API: Failed to process image: ${e.message}")
+                } finally {
+                    image?.close()
+                }
+            }, backgroundHandler)
+
+            cameraManager.openCamera(cameraId, object : CameraDevice.StateCallback() {
+                override fun onOpened(camera: CameraDevice) {
+                    try {
+                        // Create capture session with ImageReader surface
+                        camera.createCaptureSession(
+                            listOf(reader.surface),
+                            object : CameraCaptureSession.StateCallback() {
+                                override fun onConfigured(session: CameraCaptureSession) {
+                                    try {
+                                        val captureBuilder = camera.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
+                                        captureBuilder.addTarget(reader.surface)
+
+                                        session.capture(captureBuilder.build(), object : CameraCaptureSession.CaptureCallback() {
+                                            override fun onCaptureCompleted(
+                                                session: CameraCaptureSession,
+                                                request: CaptureRequest,
+                                                result: TotalCaptureResult
+                                            ) {
+                                                Logger.camera2("Capture completed")
+
+                                                // Clean up
+                                                session.close()
+                                                camera.close()
+                                                reader.close()
+
+                                                stopBackgroundThread()
+                                            }
+                                        }, backgroundHandler)
+                                    } catch (e: Exception) {
+                                        Logger.error("Camera2 API: Failed to capture: ${e.message}")
+                                        camera.close()
+                                        reader.close()
+                                        stopBackgroundThread()
+                                    }
+                                }
+
+                                override fun onConfigureFailed(session: CameraCaptureSession) {
+                                    Logger.error("Camera2 API: Failed to configure capture session")
+                                    camera.close()
+                                    reader.close()
+                                    stopBackgroundThread()
+                                }
+                            },
+                            backgroundHandler
+                        )
+                    } catch (e: Exception) {
+                        Logger.error("Camera2 API: Failed to create session: ${e.message}")
+                        camera.close()
+                        reader.close()
+                        stopBackgroundThread()
+                    }
+                }
+
+                override fun onDisconnected(camera: CameraDevice) {
+                    Logger.camera2("Camera disconnected")
+                    camera.close()
+                    reader.close()
+                    stopBackgroundThread()
+                }
+
+                override fun onError(camera: CameraDevice, error: Int) {
+                    val errorMessage = when (error) {
+                        ERROR_CAMERA_IN_USE -> "Camera in use"
+                        ERROR_MAX_CAMERAS_IN_USE -> "Max cameras in use"
+                        ERROR_CAMERA_DISABLED -> "Camera disabled by system (privacy toggle?)"
+                        ERROR_CAMERA_DEVICE -> "Camera device error"
+                        ERROR_CAMERA_SERVICE -> "Camera service error"
+                        else -> "Unknown error ($error)"
+                    }
+                    Logger.error("Camera2 API: $errorMessage")
+                    camera.close()
+                    reader.close()
+                    stopBackgroundThread()
+                }
+            }, backgroundHandler)
+
+            true
+        } catch (e: CameraAccessException) {
+            val reason = when (e.reason) {
+                CameraAccessException.CAMERA_DISABLED -> "Camera disabled by system (privacy toggle?)"
+                CameraAccessException.CAMERA_DISCONNECTED -> "Camera disconnected"
+                CameraAccessException.CAMERA_ERROR -> "Camera error"
+                CameraAccessException.CAMERA_IN_USE -> "Camera in use"
+                CameraAccessException.MAX_CAMERAS_IN_USE -> "Max cameras in use"
+                else -> "Unknown reason (${e.reason})"
+            }
+
+            Logger.error("Camera2 API: CameraAccessException - $reason")
+            stopBackgroundThread()
+
+            false
+        } catch (e: SecurityException) {
+            Logger.error("Camera2 API: SecurityException - ${e.message}")
+            stopBackgroundThread()
+
+            false
+        } catch (e: Exception) {
+            Logger.error("Camera2 API: ${e.message}")
+            stopBackgroundThread()
+
+            false
+        }
+    }
+
+    fun hasPhoto(): Boolean = photoFile.exists()
+
+    fun getPhotoBitmap(): Bitmap? = if (hasPhoto()) {
+        try {
+            BitmapFactory.decodeFile(photoFile.absolutePath)
+        } catch (e: Exception) {
+            Logger.error("Camera2 API: Failed to load photo: ${e.message}")
+            null
+        }
+    } else
+        null
+
+    fun deletePhoto() {
+        if (photoFile.exists()) {
+            photoFile.delete()
+            Logger.camera2("Photo deleted")
+        }
+    }
+
+    /**
+     * Don't expect it to work as expected. The colours are distorted.
+     * I feel retarted not being able to figure it out, but oh well...
+     */
+    private fun yuv420ToBitmap(image: Image): Bitmap? {
+        return try {
+            val renderScript = RenderScript.create(context)
+
+            val planes = image.planes
+            val yPlane = planes[0]
+            val uPlane = planes[1]
+            val vPlane = planes[2]
+
+            val yBuffer = yPlane.buffer
+            val uBuffer = uPlane.buffer
+            val vBuffer = vPlane.buffer
+
+            val ySize = image.width * image.height
+            val uvSize = ySize / 4
+
+            // Create YUV420 data
+            val yuvData = ByteArray(ySize + uvSize * 2)
+
+            // Copy Y plane (should be packed?)
+            if (yPlane.pixelStride == 1)
+                yBuffer.get(yuvData, 0, ySize)
+            else
+                for (i in 0 until image.height) // handle non-packed Y plane (wtf?)
+                    yBuffer.apply {
+                        position(i * yPlane.rowStride)
+                        get(yuvData, i * image.width, image.width)
+                    }
+
+            // Copy U and V planes (semi-planar format)
+            var uvIndex = ySize
+            val uPixelStride = uPlane.pixelStride
+            val vPixelStride = vPlane.pixelStride
+
+            if (uPixelStride == 1 && vPixelStride == 1) {
+                // Packed UV planes
+                uBuffer.get(yuvData, uvIndex, uvSize)
+                vBuffer.get(yuvData, uvIndex + uvSize, uvSize)
+            } else {
+                // Semi-planar format - interleaved UV
+                uBuffer.rewind()
+                vBuffer.rewind()
+
+                for (i in 0 until uvSize) {
+                    yuvData[uvIndex++] = uBuffer.get(i * uPixelStride)
+                    yuvData[uvIndex++] = vBuffer.get(i * vPixelStride)
+                }
+            }
+
+            // Create YUV allocation
+            val yuvTypeBuilder = Type.Builder(renderScript, Element.U8(renderScript)).setX(yuvData.size)
+            val allocationInYUV = Allocation.createTyped(renderScript, yuvTypeBuilder.create())
+            allocationInYUV.copyFrom(yuvData)
+
+            // Create RGB output allocation
+            val allocationOutRGB = Allocation.createTyped(
+                renderScript,
+                Type.createXY(renderScript, Element.RGBA_8888(renderScript), image.width, image.height),
+                Allocation.USAGE_SCRIPT
+            )
+
+            // Create and run conversion script
+            val scriptIntrinsicYuvToRGB = ScriptIntrinsicYuvToRGB.create(renderScript, Element.U8_4(renderScript))
+            scriptIntrinsicYuvToRGB.setInput(allocationInYUV)
+            scriptIntrinsicYuvToRGB.forEach(allocationOutRGB)
+
+            // Create bitmap
+            val bitmap = Bitmap.createBitmap(image.width, image.height, Bitmap.Config.ARGB_8888)
+            allocationOutRGB.copyTo(bitmap)
+
+            // Clean up
+            allocationInYUV.destroy()
+            allocationOutRGB.destroy()
+            scriptIntrinsicYuvToRGB.destroy()
+            renderScript.destroy()
+
+            bitmap
+        } catch (e: Exception) {
+            Logger.error("Camera2 API: Failed to convert YUV to bitmap with RenderScript: ${e.message}")
+            null
+        }
+    }
+
+    private fun startBackgroundThread() {
+        backgroundThread = HandlerThread("CameraBackground").also { it.start() }
+        backgroundHandler = Handler(backgroundThread!!.looper)
+    }
+
+    private fun stopBackgroundThread() {
+        backgroundThread?.quitSafely()
+        try {
+            backgroundThread?.join()
+            backgroundThread = null
+            backgroundHandler = null
+        } catch (e: InterruptedException) {
+            Logger.error("Camera2 API: Error stopping background thread: ${e.message}")
+        }
+    }
+}
+
+fun savePhotoFile(bitmap: Bitmap, file: File) {
+    FileOutputStream(file).use { fos ->
+        bitmap.compress(Bitmap.CompressFormat.WEBP_LOSSLESS, 0, fos)
+    }
+}
+
 // Sensors
 class PrivacySensors(context: Context) {
     init {
@@ -713,16 +1116,24 @@ class PrivacySensors(context: Context) {
 class MainActivity : ComponentActivity() {
     private lateinit var audioSystemMonitor: AudioSystemMonitor
     private lateinit var recordingCallbackHandler: RecordingCallbackHandler
+    private lateinit var camera1Manager: Camera1Manager
+    private lateinit var camera2Manager: Camera2Manager
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
         val recordAudioGranted = permissions[RECORD_AUDIO] ?: false
+        val cameraGranted = permissions[CAMERA] ?: false
 
         if (recordAudioGranted)
             Logger.permission("Audio recording permission granted - callback registered")
         else
             Logger.permission("Audio recording permission denied")
+
+        if (cameraGranted)
+            Logger.permission("Camera permission granted")
+        else
+            Logger.permission("Camera permission denied")
 
         setupRecordingCallback() // still catch external recording configurations
     }
@@ -744,6 +1155,8 @@ class MainActivity : ComponentActivity() {
         audioSystemMonitor = AudioSystemMonitor(this)
         val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         recordingCallbackHandler = RecordingCallbackHandler(audioManager)
+        camera1Manager = Camera1Manager(this)
+        camera2Manager = Camera2Manager(this)
 
         initializeMonitor()
 
@@ -753,6 +1166,8 @@ class MainActivity : ComponentActivity() {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     RecordingMonitorScreen(
                         audioSystemMonitor = audioSystemMonitor,
+                        camera1Manager = camera1Manager,
+                        camera2Manager = camera2Manager,
                         modifier = Modifier
                             .padding(innerPadding)
                             .fillMaxSize(),
@@ -764,11 +1179,18 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun initializeMonitor() {
-        if (ContextCompat.checkSelfPermission(this, RECORD_AUDIO) != PERMISSION_GRANTED)
-            requestPermissionLauncher.launch(arrayOf(RECORD_AUDIO))
-        else {
+        val audioPermissionGranted = ContextCompat.checkSelfPermission(this, RECORD_AUDIO) == PERMISSION_GRANTED
+        val cameraPermissionGranted = ContextCompat.checkSelfPermission(this, CAMERA) == PERMISSION_GRANTED
+
+        if (audioPermissionGranted.not() || cameraPermissionGranted.not()) {
+            val permissionsToRequest = mutableListOf<String>()
+            if (audioPermissionGranted.not()) permissionsToRequest.add(RECORD_AUDIO)
+            if (cameraPermissionGranted.not()) permissionsToRequest.add(CAMERA)
+
+            requestPermissionLauncher.launch(permissionsToRequest.toTypedArray())
+        } else {
             setupRecordingCallback()
-            Logger.permission("Audio recording permission already granted - callback registered")
+            Logger.permission("All permissions already granted - callback registered")
         }
     }
 
@@ -779,6 +1201,12 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         recordingCallbackHandler.unregister()
+
+        // Clean up photos
+        camera1Manager.deletePhoto()
+        camera2Manager.deletePhoto()
+
+        // Stop background recordings (yeah, this is ultimate shitcode, don't blame me, idc rn)
         Process.killProcess(Process.myPid())
     }
 }
@@ -787,6 +1215,8 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun RecordingMonitorScreen(
     audioSystemMonitor: AudioSystemMonitor,
+    camera1Manager: Camera1Manager,
+    camera2Manager: Camera2Manager,
     modifier: Modifier = Modifier,
     onOpenPermissionsMenu: () -> Unit
 ) {
@@ -800,6 +1230,10 @@ fun RecordingMonitorScreen(
 
     var mediaRecorderState by remember { mutableStateOf(false) }
     var audioRecordState by remember { mutableStateOf(false) }
+    var camera1HasPhoto by remember { mutableStateOf(camera1Manager.hasPhoto()) }
+    var camera2HasPhoto by remember { mutableStateOf(camera2Manager.hasPhoto()) }
+    var showCamera1Photo by remember { mutableStateOf(false) }
+    var showCamera2Photo by remember { mutableStateOf(false) }
 
     // PrivacySensors info
     val privacySensors = remember { PrivacySensors(context) }
@@ -826,25 +1260,53 @@ fun RecordingMonitorScreen(
             audioRecordState = audioRecordState,
 
             onMediaRecorderToggle = {
-                if (mediaRecorderState) {
+                if (mediaRecorderState)
                     mediaRecorderManager.stopRecording()
-                } else {
+                else
                     mediaRecorderManager.startRecording()
-                }
+
                 mediaRecorderState = mediaRecorderManager.isRecording
             },
 
             onAudioRecordToggle = {
-                if (audioRecordState) {
+                if (audioRecordState)
                     audioRecordManager.stopRecording()
-                } else {
+                else
                     audioRecordManager.startRecording()
-                }
+
                 audioRecordState = audioRecordManager.isRecording
             },
 
             onShowTrackingInfo = {
                 Logger.system(AppRecordingTracker.getDebugInfo())
+            }
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Camera Test Controls
+        CameraTestCard(
+            camera1HasPhoto = camera1HasPhoto,
+            camera2HasPhoto = camera2HasPhoto,
+
+            onCamera1TakePhoto = {
+                camera1Manager.takePhoto {
+                    camera1HasPhoto = camera1Manager.hasPhoto()
+                }
+            },
+
+            onCamera2TakePhoto = {
+                camera2Manager.takePhoto {
+                    camera2HasPhoto = camera2Manager.hasPhoto()
+                }
+            },
+
+            onCamera1ShowPhoto = {
+                showCamera1Photo = true
+            },
+
+            onCamera2ShowPhoto = {
+                showCamera2Photo = true
             }
         )
 
@@ -859,6 +1321,55 @@ fun RecordingMonitorScreen(
                 .weight(1f)
         )
     }
+
+    // Photo dialogs
+    if (showCamera1Photo)
+        camera1Manager.getPhotoBitmap()?.let { bitmap ->
+            Dialog(onDismissRequest = { showCamera1Photo = false }) {
+                Card {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("Camera1 API Photo", style = MaterialTheme.typography.titleMedium)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Image(
+                            bitmap = bitmap.asImageBitmap(),
+                            contentDescription = "Camera1 API photo",
+                            modifier = Modifier.size(300.dp)
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Button(
+                            onClick = { showCamera1Photo = false },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Close")
+                        }
+                    }
+                }
+            }
+        }
+
+    if (showCamera2Photo)
+        camera2Manager.getPhotoBitmap()?.let { bitmap ->
+            Dialog(onDismissRequest = { showCamera2Photo = false }) {
+                Card {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text("Camera2 API Photo", style = MaterialTheme.typography.titleMedium)
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Image(
+                            bitmap = bitmap.asImageBitmap(),
+                            contentDescription = "Camera2 API photo",
+                            modifier = Modifier.size(300.dp)
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Button(
+                            onClick = { showCamera2Photo = false },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Close")
+                        }
+                    }
+                }
+            }
+        }
 }
 
 @Composable
@@ -1045,7 +1556,7 @@ fun TestRecordingCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "Test Recording (triggers callback)",
+                    text = "Test Audio Recording",
                     style = MaterialTheme.typography.titleMedium
                 )
 
@@ -1077,6 +1588,100 @@ fun TestRecordingCard(
 }
 
 @Composable
+fun CameraTestCard(
+    camera1HasPhoto: Boolean,
+    camera2HasPhoto: Boolean,
+    onCamera1TakePhoto: () -> Unit,
+    onCamera2TakePhoto: () -> Unit,
+    onCamera1ShowPhoto: () -> Unit,
+    onCamera2ShowPhoto: () -> Unit
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Camera1 API section
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = "Test Camera1 API",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = onCamera1TakePhoto) {
+                            Icon(
+                                imageVector = LineAwesomeIcons.CameraRetroSolid,
+                                contentDescription = "Take photo with Camera1 API",
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
+
+                        if (camera1HasPhoto)
+                            IconButton(onClick = onCamera1ShowPhoto) {
+                                Icon(
+                                    imageVector = LineAwesomeIcons.FilmSolid,
+                                    contentDescription = "View Camera1 API photo",
+                                    tint = MaterialTheme.colorScheme.secondary
+                                )
+                            }
+                    }
+                }
+
+                // Visual separator
+                Box(
+                    modifier = Modifier
+                        .width(1.dp)
+                        .height(48.dp)
+                        .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+                )
+
+                // Camera2 API section
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = "Test Camera2 API",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = onCamera2TakePhoto) {
+                            Icon(
+                                imageVector = LineAwesomeIcons.CameraSolid,
+                                contentDescription = "Take photo with Camera2 API",
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
+
+                        if (camera2HasPhoto)
+                            IconButton(onClick = onCamera2ShowPhoto) {
+                                Icon(
+                                    imageVector = LineAwesomeIcons.Image,
+                                    contentDescription = "View Camera2 API photo",
+                                    tint = MaterialTheme.colorScheme.secondary
+                                )
+                            }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 fun LogDisplayCard(
     logMessages: List<String>,
     onClearLogs: () -> Unit,
@@ -1098,7 +1703,7 @@ fun LogDisplayCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "Recording Activity Log",
+                    text = "Activity Log",
                     style = MaterialTheme.typography.titleMedium
                 )
 
@@ -1124,11 +1729,13 @@ fun LogDisplayCard(
                 if (logMessages.isEmpty()) {
                     Text(
                         buildString {
-                            appendLine("No recording activity detected yet.")
+                            appendLine("No activity detected yet.")
                             appendLine("Try:")
+                            appendLine("- Taking photos with camera buttons above")
                             appendLine("- Starting test recording above")
-                            appendLine("- Opening another app that records audio")
+                            appendLine("- Opening another app that records audio/video")
                             appendLine("- Making a phone call")
+                            appendLine("- Toggle privacy sensors in system settings")
                         },
                         style = MaterialTheme.typography.bodySmall
                     )
