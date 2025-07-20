@@ -1257,7 +1257,7 @@ class LogcatListener {
     /**
      * Creates a Flow that monitors logcat and emits true when target errors are detected
      */
-    fun monitorCameraErrors(): Flow<Boolean> = flow {
+    fun monitorCamera2DeadThreads(): Flow<Boolean> = flow {
         Runtime.getRuntime().exec("logcat -c").waitFor()
 
         val process = ProcessBuilder("logcat", "-v", "long")
@@ -1381,9 +1381,9 @@ class MainActivity : ComponentActivity() {
 
     private fun startLogMonitoring() {
         logScope.launch {
-            logcatListener.monitorCameraErrors().collect { hasError ->
+            logcatListener.monitorCamera2DeadThreads().collect { hasError ->
                 if (hasError)
-                    Logger.error("Camera disabled by privacy toggle detected in logcat")
+                    Logger.error("Camera2 sending message to a Handler on a dead thread.")
             }
         }
     }
