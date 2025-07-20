@@ -98,14 +98,23 @@ import compose.icons.lineawesomeicons.CameraSolid
 import compose.icons.lineawesomeicons.FilmSolid
 import compose.icons.lineawesomeicons.Image
 import compose.icons.lineawesomeicons.MicrochipSolid
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.launch
 import org.lsposed.hiddenapibypass.HiddenApiBypass
 import std.student.demo.privacySensors.ui.theme.DefaultTheme
+import java.io.BufferedReader
 import java.io.File
 import java.io.FileOutputStream
+import java.io.InputStreamReader
 import java.lang.reflect.Executable
 import kotlin.io.path.createTempFile
 
@@ -666,8 +675,10 @@ class AudioRecordManager {
 class Camera1Manager(context: Context) {
     private val photoFile = File(context.filesDir, "camera1_photo.webp")
 
+    private val cameraBlockDetector = CameraBlockDetector()
+
     @SuppressLint("MissingPermission")
-    fun takePhoto(onPhotoTaken: () -> Unit): Boolean {
+    fun takePhoto(onPhotoTaken: (isBlocked: Boolean, blockResult: CameraBlockDetector.BlockResult?) -> Unit): Boolean {
         return try {
             val numberOfCameras = Camera.getNumberOfCameras()
             if (numberOfCameras == 0) {
@@ -687,7 +698,6 @@ class Camera1Manager(context: Context) {
             val smallestSize = pictureSizes.minByOrNull { it.width * it.height } ?: pictureSizes[0]
             parameters.setPictureSize(smallestSize.width, smallestSize.height)
 
-
             camera.parameters = parameters
 
             // Create a dummy surface texture for preview
@@ -701,15 +711,30 @@ class Camera1Manager(context: Context) {
                         // Convert data to Bitmap and save as raw bitmap
                         val bitmap = BitmapFactory.decodeByteArray(data, 0, data.size)
                         if (bitmap != null) {
+                            //logUniquePixels(bitmap)
+
                             savePhotoFile(bitmap, photoFile)
-                            Logger.success("Camera1 API: Raw photo saved (${bitmap.width}x${bitmap.height})")
-                            onPhotoTaken()
-                        } else
+
+                            // Detect if camera is blocked
+                            val blockResult = cameraBlockDetector.isDisabled(bitmap)
+
+                            if (blockResult.isDisabled)
+                                Logger.camera("Camera1 API: Camera appears to be blocked by privacy toggle - repeated pixels detected")
+                            else
+                                Logger.success("Camera1 API: Photo saved (${bitmap.width}x${bitmap.height})")
+
+                            onPhotoTaken(blockResult.isDisabled, blockResult)
+                        } else {
                             Logger.error("Camera1 API: Failed to decode photo data")
-                    } else
+                            onPhotoTaken(false, null)
+                        }
+                    } else {
                         Logger.error("Camera1 API: Photo data is null or empty (privacy toggle may be enabled)")
+                        onPhotoTaken(true, null) // Likely blocked if no data
+                    }
                 } catch (e: Exception) {
                     Logger.error("Camera1 API: Failed to save photo: ${e.message}")
+                    onPhotoTaken(false, null)
                 } finally {
                     try {
                         camera.stopPreview()
@@ -724,13 +749,20 @@ class Camera1Manager(context: Context) {
             true
         } catch (e: RuntimeException) {
             when (e.message) {
-                "Fail to connect to camera service" -> Logger.camera("Camera1 API: Failed to connect to camera service - possibly blocked")
-                else -> Logger.error("Camera1 API: ${e.message}")
-            }
+                "Fail to connect to camera service" -> {
+                    Logger.camera("Camera1 API: Failed to connect to camera service - possibly blocked")
+                    onPhotoTaken(true, null)
+                }
 
+                else -> {
+                    Logger.error("Camera1 API: ${e.message}")
+                    onPhotoTaken(false, null)
+                }
+            }
             false
         } catch (e: Exception) {
             Logger.error("Camera1 API: ${e.message}")
+            onPhotoTaken(false, null)
             false
         }
     }
@@ -761,6 +793,20 @@ class Camera2Manager(private val context: Context) {
     private var backgroundThread: HandlerThread? = null
     private var backgroundHandler: Handler? = null
 
+    private fun Bitmap.isSamePixelRepeated(): Boolean {
+        if (width == 0 || height == 0) return false
+
+        val pixels = IntArray(width * height)
+        this.getPixels(pixels, 0, width, 0, 0, width, height)
+
+        val firstPixel = pixels[0]
+        for (pixel in pixels)
+            if (pixel != firstPixel)
+                return false
+
+        return true
+    }
+
     @SuppressLint("MissingPermission")
     fun takePhoto(onPhotoTaken: () -> Unit): Boolean {
         return try {
@@ -784,6 +830,12 @@ class Camera2Manager(private val context: Context) {
                         // Convert YUV image to bitmap
                         val bitmap = yuv420ToBitmap(image)
                         if (bitmap != null) {
+                            //logUniquePixels(bitmap)
+
+                            val isCameraBlocked = bitmap.isSamePixelRepeated()
+                            if (isCameraBlocked)
+                                Logger.camera2("Camera2 API: Camera appears to be blocked by privacy toggle - repeated pixels detected")
+
                             savePhotoFile(bitmap, photoFile)
                             Logger.success("Camera2 API: Raw photo saved (${bitmap.width}x${bitmap.height})")
                             onPhotoTaken()
@@ -1031,6 +1083,81 @@ fun savePhotoFile(bitmap: Bitmap, file: File) {
     }
 }
 
+// Only useful for Camera1
+class CameraBlockDetector {
+    data class BlockResult(
+        val isDisabled: Boolean,
+        val confidence: Float
+    )
+
+    fun isDisabled(bitmap: Bitmap): BlockResult {
+        val pixels = IntArray(bitmap.width * bitmap.height)
+        bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+
+        val uniquePixels = mutableSetOf<Int>()
+        var singleChannelCount = 0
+        var maxChannelValue = 0
+
+        for (pixel in pixels) {
+            uniquePixels.add(pixel)
+
+            val r = android.graphics.Color.red(pixel)
+            val g = android.graphics.Color.green(pixel)
+            val b = android.graphics.Color.blue(pixel)
+
+            maxChannelValue = maxOf(maxChannelValue, r, g, b)
+
+            // Count pixels with only one channel active
+            val activeChannels = listOf(r > 0, g > 0, b > 0).count { it }
+            if (activeChannels == 1)
+                singleChannelCount++
+        }
+
+        val uniquePixelRatio = uniquePixels.size.toFloat() / pixels.size
+        val singleChannelRatio = singleChannelCount.toFloat() / pixels.size
+
+        // Disabled camera characteristics:
+        // 1. Very few unique pixels (typically 40-50, or 0%, out of thousands)
+        // 2. High single-channel pixel ratio (70%+)
+        // 3. Very low max channel values (not exceeding 12 for me)
+
+        val isDisabled = uniquePixelRatio < 0.01f // Less than 1% unique pixels
+            && singleChannelRatio > 0.6f          // More than 60% single-channel
+            &&  maxChannelValue <= 12             // Max RGB value <= 12
+
+        val confidence = if (isDisabled) {
+            var conf = 0.7f // Base confidence
+
+            // Boost confidence for stronger indicators
+            if (uniquePixelRatio < 0.005f) conf += 0.1f    // Extremely few unique pixels
+            if (singleChannelRatio > 0.8f) conf += 0.1f    // Very high single-channel ratio
+            if (maxChannelValue <= 8) conf += 0.1f         // Very low max values
+
+            minOf(conf, 0.95f) // Cap at 95%
+        } else
+            // Low confidence when not disabled
+            maxOf(0.1f, 0.9f - uniquePixelRatio * 10f)
+
+        return BlockResult(isDisabled, confidence)
+    }
+}
+
+fun logUniquePixels(bitmap: Bitmap) {
+    val pixels = IntArray(bitmap.width * bitmap.height)
+    bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+
+    val rgbList = mutableSetOf<String>()
+    for (pixel in pixels) {
+        val r: Int = android.graphics.Color.red(pixel)
+        val g: Int = android.graphics.Color.green(pixel)
+        val b: Int = android.graphics.Color.blue(pixel)
+
+        rgbList.add("R: $r, G: $g, B: $b")
+    }
+
+    Log.d("RGB", rgbList.joinToString("\n"))
+}
+
 // Sensors
 class PrivacySensors(context: Context) {
     init {
@@ -1112,6 +1239,112 @@ class PrivacySensors(context: Context) {
     }
 }
 
+class LogcatListener {
+    private val cameraKeywords = listOf(
+        "camera2",
+        "CameraDevice",
+        "CameraHandler",
+        "android.hardware.camera"
+    )
+
+    private val targetKeywords = listOf(
+        "MessageQueue",
+        "Handler",
+        "dead thread",
+        "IllegalStateException"
+    )
+
+    /**
+     * Creates a Flow that monitors logcat and emits true when target errors are detected
+     */
+    fun monitorCameraErrors(): Flow<Boolean> = flow {
+        Runtime.getRuntime().exec("logcat -c").waitFor()
+
+        val process = ProcessBuilder("logcat", "-v", "long")
+            .redirectErrorStream(true)
+            .start()
+
+        val reader = BufferedReader(InputStreamReader(process.inputStream))
+        val logBuffer = StringBuilder()
+        var isInErrorBlock = false
+        var errorStartTime = 0L
+
+        try {
+            var line: String?
+            while (reader.readLine().also { line = it } != null) {
+                line?.let { currentLine ->
+                    // Yep, this is not valid and will backfire. Do I care? Nope.
+                    val isLogEntryStart = currentLine.startsWith("[ ")
+
+                    if (isLogEntryStart) {
+                        // Process the previous accumulated error block
+                        if (isInErrorBlock && logBuffer.isNotEmpty()) {
+                            val errorText = logBuffer.toString()
+                            if (isTargetError(errorText))
+                                emit(true)
+                        }
+
+                        // Reset for new log entry
+                        logBuffer.clear()
+                        isInErrorBlock = false
+                        errorStartTime = System.currentTimeMillis()
+                    }
+
+                    // Add current line to buffer
+                    logBuffer.appendLine(currentLine)
+
+                    // Check if this line indicates start of error tracking
+                    if (!isInErrorBlock && containsAnyKeyword(currentLine, targetKeywords))
+                        isInErrorBlock = true
+
+                    // Continue accumulating if we're in an error block
+                    // Stop accumulating after half a second to prevent memory issues
+                    if (isInErrorBlock && System.currentTimeMillis() - errorStartTime > 1500)
+                        isInErrorBlock = false
+                }
+            }
+        } catch (e: Exception) {
+            Logger.error("Logcat monitoring error: ${e.message}")
+        } finally {
+            try {
+                process.destroyForcibly()
+                reader.close()
+            } catch (e: Exception) {
+                Logger.error("Failed to close logcat reader: ${e.message}")
+            }
+        }
+    }.flowOn(Dispatchers.IO)
+
+    /**
+     * Determines if the accumulated error text matches all criteria
+     */
+    private fun isTargetError(errorText: String): Boolean {
+        val lowercaseError = errorText.lowercase()
+
+        // Check if contains all required keywords
+        val hasAllTargetKeywords = targetKeywords.all { keyword ->
+            lowercaseError.contains(keyword.lowercase())
+        }
+
+        // Check if contains at least one camera-related keyword
+        val hasCameraKeyword = cameraKeywords.any { keyword ->
+            lowercaseError.contains(keyword.lowercase())
+        }
+
+        return hasAllTargetKeywords && hasCameraKeyword
+    }
+
+    /**
+     * Helper function to check if text contains any of the provided keywords
+     */
+    private fun containsAnyKeyword(text: String, keywords: List<String>): Boolean {
+        val lowercaseText = text.lowercase()
+        return keywords.any { keyword ->
+            lowercaseText.contains(keyword.lowercase())
+        }
+    }
+}
+
 // Main
 class MainActivity : ComponentActivity() {
     private lateinit var audioSystemMonitor: AudioSystemMonitor
@@ -1138,6 +1371,22 @@ class MainActivity : ComponentActivity() {
         setupRecordingCallback() // still catch external recording configurations
     }
 
+    private val logcatListener = LogcatListener()
+    private val logScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+
+    private fun startLogMonitoring() {
+        logScope.launch {
+            logcatListener.monitorCameraErrors().collect { hasError ->
+                if (hasError)
+                    Logger.error("Camera disabled by privacy toggle detected in logcat")
+            }
+        }
+    }
+
+    private fun stopLogMonitoring() {
+        logScope.cancel()
+    }
+
     private fun openAppSettings() {
         val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
             data = Uri.fromParts("package", packageName, null)
@@ -1159,6 +1408,7 @@ class MainActivity : ComponentActivity() {
         camera2Manager = Camera2Manager(this)
 
         initializeMonitor()
+        startLogMonitoring()
 
         enableEdgeToEdge()
         setContent {
@@ -1205,6 +1455,9 @@ class MainActivity : ComponentActivity() {
         // Clean up photos
         camera1Manager.deletePhoto()
         camera2Manager.deletePhoto()
+
+        // Stop logcat monitoring
+        stopLogMonitoring()
 
         // Stop background recordings (yeah, this is ultimate shitcode, don't blame me, idc rn)
         Process.killProcess(Process.myPid())
@@ -1290,7 +1543,13 @@ fun RecordingMonitorScreen(
             camera2HasPhoto = camera2HasPhoto,
 
             onCamera1TakePhoto = {
-                camera1Manager.takePhoto {
+                camera1Manager.takePhoto { isBlocked, blockResult ->
+                    if (isBlocked)
+                        if (blockResult != null)
+                            Logger.camera("Camera appears to be blocked by privacy toggle: ${blockResult.confidence * 100}% confidence.")
+                        else
+                            Logger.camera("Camera access is restricted.")
+
                     camera1HasPhoto = camera1Manager.hasPhoto()
                 }
             },
@@ -1726,7 +1985,7 @@ fun LogDisplayCard(
                     .fillMaxWidth()
                     .verticalScroll(scrollState)
             ) {
-                if (logMessages.isEmpty()) {
+                if (logMessages.isEmpty())
                     Text(
                         buildString {
                             appendLine("No activity detected yet.")
@@ -1739,7 +1998,7 @@ fun LogDisplayCard(
                         },
                         style = MaterialTheme.typography.bodySmall
                     )
-                } else {
+                else
                     logMessages.forEach { message ->
                         Text(
                             text = message,
@@ -1748,7 +2007,6 @@ fun LogDisplayCard(
                             modifier = Modifier.padding(vertical = 2.dp)
                         )
                     }
-                }
             }
         }
     }
