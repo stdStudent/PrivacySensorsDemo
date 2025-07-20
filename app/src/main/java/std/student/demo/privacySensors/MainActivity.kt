@@ -134,23 +134,31 @@ object AppRecordingTracker {
     private val ownPortIds = mutableSetOf<Int>()
     var ownPackageName: String = ""
 
+    // Add StateFlow to notify about tracking changes
+    private val updateFlow = MutableStateFlow(0L)
+    val trackingUpdateFlow: StateFlow<Long> = updateFlow.asStateFlow()
+
     fun addSessionId(sessionId: Int) {
         ownSessionIds.add(sessionId)
+        updateFlow.value = System.currentTimeMillis()
         Logger.system("Tracked own session ID: $sessionId")
     }
 
     fun addPortId(portId: Int) {
         ownPortIds.add(portId)
+        updateFlow.value = System.currentTimeMillis()
         Logger.system("Tracked own port ID: $portId")
     }
 
     fun removeSessionId(sessionId: Int) {
         ownSessionIds.remove(sessionId)
+        updateFlow.value = System.currentTimeMillis()
         Logger.system("Untracked own session ID: $sessionId")
     }
 
     fun removePortId(portId: Int) {
         ownPortIds.remove(portId)
+        updateFlow.value = System.currentTimeMillis()
         Logger.system("Untracked own port ID: $portId")
     }
 
@@ -239,8 +247,17 @@ class AudioSystemMonitor(context: Context) {
         val initialState = getCurrentAudioSystemState()
         trySend(initialState)
 
+        // Also listen to tracking updates
+        val trackingUpdateJob = launch {
+            AppRecordingTracker.trackingUpdateFlow.collect {
+                val state = getCurrentAudioSystemState()
+                trySend(state)
+            }
+        }
+
         awaitClose {
             audioManager.unregisterAudioRecordingCallback(callback)
+            trackingUpdateJob.cancel()
         }
     }.distinctUntilChanged()
 
@@ -518,6 +535,8 @@ class MediaRecorderManager(private val context: Context) {
     private var mediaRecorder: MediaRecorder? = null
     private var tempOutputFile: String? = null
     private var currentPortId: Int? = null
+    private var portIdTrackingHandler: Handler? = null
+    private var portIdTrackingRunnable: Runnable? = null
 
     val isRecording: Boolean get() = mediaRecorder != null
 
@@ -549,16 +568,8 @@ class MediaRecorderManager(private val context: Context) {
             recorder.start()
             mediaRecorder = recorder
 
-            val portId = getPortId(recorder)
-            Logger.mediaRecorder("Port ID: $portId")
-
-            // Track own port ID if it's valid
-            portId.toIntOrNull()?.let { id ->
-                if (id != -1) {
-                    currentPortId = id
-                    AppRecordingTracker.addPortId(id)
-                }
-            }
+            // Start continuous port ID tracking
+            startPortIdTracking(recorder)
 
             Logger.mediaRecorder("Started recording")
             true
@@ -572,6 +583,9 @@ class MediaRecorderManager(private val context: Context) {
         if (!isRecording) return
 
         try {
+            // Stop port ID tracking first
+            stopPortIdTracking()
+
             mediaRecorder?.apply {
                 stop()
                 release()
@@ -592,6 +606,51 @@ class MediaRecorderManager(private val context: Context) {
             }
             tempOutputFile = null
         }
+    }
+
+    private fun startPortIdTracking(recorder: MediaRecorder) {
+        portIdTrackingHandler = Handler(Looper.getMainLooper())
+
+        portIdTrackingRunnable = object : Runnable {
+            override fun run() {
+                try {
+                    val portIdString = getPortId(recorder)
+                    val newPortId = portIdString.toIntOrNull()
+
+                    if (newPortId != null && newPortId != -1)
+                        if (currentPortId != newPortId) {
+                            // Port ID changed - update tracking
+                            currentPortId?.let { oldPortId ->
+                                AppRecordingTracker.removePortId(oldPortId)
+                                Logger.mediaRecorder("Port ID changed from $oldPortId to $newPortId")
+                            }
+
+                            currentPortId = newPortId
+                            AppRecordingTracker.addPortId(newPortId)
+                            Logger.mediaRecorder("Tracking new Port ID: $newPortId")
+                        }
+                } catch (e: Exception) {
+                    Logger.error("Error tracking port ID: ${e.message}")
+                }
+
+                // Schedule next check in 1 second
+                portIdTrackingHandler?.postDelayed(this, 1000)
+            }
+        }
+
+        // Start tracking immediately
+        portIdTrackingRunnable?.let { runnable ->
+            portIdTrackingHandler?.post(runnable)
+        }
+    }
+
+    private fun stopPortIdTracking() {
+        portIdTrackingRunnable?.let { runnable ->
+            portIdTrackingHandler?.removeCallbacks(runnable)
+        }
+
+        portIdTrackingHandler = null
+        portIdTrackingRunnable = null
     }
 
     private fun getPortId(recorder: MediaRecorder): String {
