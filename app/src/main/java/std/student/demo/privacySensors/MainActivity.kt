@@ -1268,6 +1268,7 @@ class LogcatListener {
         val logBuffer = StringBuilder()
         var isInErrorBlock = false
         var errorStartTime = 0L
+        var hasEmittedForCurrentBlock = false
 
         try {
             var line: String?
@@ -1277,16 +1278,10 @@ class LogcatListener {
                     val isLogEntryStart = currentLine.startsWith("[ ")
 
                     if (isLogEntryStart) {
-                        // Process the previous accumulated error block
-                        if (isInErrorBlock && logBuffer.isNotEmpty()) {
-                            val errorText = logBuffer.toString()
-                            if (isTargetError(errorText))
-                                emit(true)
-                        }
-
                         // Reset for new log entry
                         logBuffer.clear()
                         isInErrorBlock = false
+                        hasEmittedForCurrentBlock = false
                         errorStartTime = System.currentTimeMillis()
                     }
 
@@ -1294,10 +1289,20 @@ class LogcatListener {
                     logBuffer.appendLine(currentLine)
 
                     // Check if this line indicates start of error tracking
-                    if (!isInErrorBlock && containsAnyKeyword(currentLine, targetKeywords))
+                    if (isInErrorBlock.not() && containsAnyKeyword(currentLine, targetKeywords)) {
                         isInErrorBlock = true
+                        hasEmittedForCurrentBlock = false
+                    }
 
-                    // Continue accumulating if we're in an error block
+                    // Check for target error immediately when in error block
+                    if (isInErrorBlock && !hasEmittedForCurrentBlock) {
+                        val errorText = logBuffer.toString()
+                        if (isTargetError(errorText)) {
+                            emit(true)
+                            hasEmittedForCurrentBlock = true
+                        }
+                    }
+
                     // Stop accumulating after half a second to prevent memory issues
                     if (isInErrorBlock && System.currentTimeMillis() - errorStartTime > 1500)
                         isInErrorBlock = false
