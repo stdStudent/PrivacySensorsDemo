@@ -88,7 +88,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.core.content.ContextCompat
@@ -205,8 +208,7 @@ object Logger {
 // Audio system state data
 data class AudioSystemState(
     val audioMode: String,
-    val clientSilencedStatus: String,
-    val ownedRecordingsStatus: String
+    val recordingSummary: Triple<Int, Int, Int> // silenced, owned, total
 )
 
 // Camera status data
@@ -264,8 +266,7 @@ class AudioSystemMonitor(context: Context) {
     private fun getCurrentAudioSystemState(): AudioSystemState {
         return AudioSystemState(
             audioMode = getAudioModeDescription(),
-            clientSilencedStatus = getClientSilencedStatus(),
-            ownedRecordingsStatus = getOwnedRecordingsStatus()
+            recordingSummary = getRecordingSummary()
         )
     }
 
@@ -278,27 +279,15 @@ class AudioSystemMonitor(context: Context) {
             else -> "Audio Mode: Unknown ($mode)"
         }
 
-    private fun getClientSilencedStatus(): String {
-        val configurations = audioManager.activeRecordingConfigurations
-        return if (configurations.isEmpty())
-            "No active recordings"
-        else {
-            val silencedCount = configurations.count { it.isClientSilenced }
-            val totalCount = configurations.size
-            when (silencedCount) {
-                0          -> "All $totalCount clients not silenced"
-                totalCount -> "All $totalCount clients silenced"
-                else       -> "$silencedCount/$totalCount clients silenced"
-            }
-        }
-    }
-
-    private fun getOwnedRecordingsStatus(): String {
+    /**
+     * @return Triple containing:
+     * - Number of silenced recordings
+     * - Number of owned recordings
+     * - Total number of active recordings
+     */
+    private fun getRecordingSummary(): Triple<Int, Int, Int> {
         val configurations = audioManager.activeRecordingConfigurations
         val totalCount = configurations.size
-
-        if (totalCount == 0)
-            return "0/0 owned recordings"
 
         val ownedCount = configurations.count { config ->
             val sessionId = config.clientAudioSessionId
@@ -307,7 +296,9 @@ class AudioSystemMonitor(context: Context) {
             AppRecordingTracker.isOwnConfig(sessionId, portId, packageName)
         }
 
-        return "$ownedCount/$totalCount owned recordings"
+        val silencedCount = configurations.count { it.isClientSilenced }
+
+        return Triple(silencedCount, ownedCount, totalCount)
     }
 
     private fun getClientPortId(config: AudioRecordingConfiguration): String {
@@ -1585,7 +1576,7 @@ fun RecordingMonitorScreen(
 ) {
     val context = LocalContext.current
     val audioSystemState by audioSystemMonitor.observeAudioSystemState().collectAsState(
-        initial = AudioSystemState("Loading...", "Loading...", "Loading...")
+        initial = AudioSystemState("Loading...", Triple(0, 0, 0))
     )
 
     val mediaRecorderManager = remember { MediaRecorderManager(context) }
@@ -1848,8 +1839,33 @@ fun SystemStatusCard(
 
             Spacer(modifier = Modifier.height(4.dp))
 
-            Text(audioSystemState.clientSilencedStatus)
-            Text(audioSystemState.ownedRecordingsStatus)
+            // Coloured recording count
+            Text(buildAnnotatedString {
+                withStyle(style = SpanStyle(color = Color(0xFFD32F2F))) {
+                    append(audioSystemState.recordingSummary.first.toString())
+                }
+                append("/")
+                withStyle(style = SpanStyle(color = Color(0xFF388E3C))) {
+                    append(audioSystemState.recordingSummary.second.toString())
+                }
+                append("/")
+                withStyle(style = SpanStyle(color = Color(0xFF1976D2))) {
+                    append("${audioSystemState.recordingSummary.third}")
+                }
+                append("   :   ")
+                withStyle(style = SpanStyle(color = Color(0xFFD32F2F))) {
+                    append("silenced")
+                }
+                append("/")
+                withStyle(style = SpanStyle(color = Color(0xFF388E3C))) {
+                    append("own")
+                }
+                append("/")
+                withStyle(style = SpanStyle(color = Color(0xFF1976D2))) {
+                    append("total")
+                }
+                append(" recordings")
+            })
 
             Spacer(modifier = Modifier.height(8.dp))
 
