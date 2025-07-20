@@ -47,6 +47,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -95,15 +96,21 @@ import compose.icons.LineAwesomeIcons
 import compose.icons.lineawesomeicons.Android
 import compose.icons.lineawesomeicons.CameraRetroSolid
 import compose.icons.lineawesomeicons.CameraSolid
+import compose.icons.lineawesomeicons.CheckCircle
 import compose.icons.lineawesomeicons.FilmSolid
 import compose.icons.lineawesomeicons.Image
 import compose.icons.lineawesomeicons.MicrochipSolid
+import compose.icons.lineawesomeicons.QuestionCircle
+import compose.icons.lineawesomeicons.TimesCircle
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flow
@@ -192,6 +199,18 @@ data class AudioSystemState(
     val audioMode: String,
     val clientSilencedStatus: String,
     val ownedRecordingsStatus: String
+)
+
+// Camera status data
+data class Camera1Status(
+    val isBlocked: Boolean? = null,
+    val confidence: Float = 0f,
+    val hasPhoto: Boolean = false
+)
+
+data class Camera2Status(
+    val isBlocked: Boolean? = null,
+    val hasPhoto: Boolean = false
 )
 
 // Audio system monitor
@@ -674,11 +693,13 @@ class AudioRecordManager {
 // Camera managers
 class Camera1Manager(context: Context) {
     private val photoFile = File(context.filesDir, "camera1_photo.webp")
-
     private val cameraBlockDetector = CameraBlockDetector()
 
+    private val stateFlow = MutableStateFlow(Camera1Status())
+    val statusFlow: StateFlow<Camera1Status> = stateFlow.asStateFlow()
+
     @SuppressLint("MissingPermission")
-    fun takePhoto(onPhotoTaken: (isBlocked: Boolean, blockResult: CameraBlockDetector.BlockResult?) -> Unit): Boolean {
+    fun takePhoto(): Boolean {
         return try {
             val numberOfCameras = Camera.getNumberOfCameras()
             if (numberOfCameras == 0) {
@@ -718,23 +739,25 @@ class Camera1Manager(context: Context) {
                             // Detect if camera is blocked
                             val blockResult = cameraBlockDetector.isDisabled(bitmap)
 
-                            if (blockResult.isDisabled)
-                                Logger.camera("Camera1 API: Camera appears to be blocked by privacy toggle - repeated pixels detected")
-                            else
-                                Logger.success("Camera1 API: Photo saved (${bitmap.width}x${bitmap.height})")
+                            Logger.success("Camera1 API: Photo saved (${bitmap.width}x${bitmap.height})")
 
-                            onPhotoTaken(blockResult.isDisabled, blockResult)
+                            // Update status flow
+                            stateFlow.value = Camera1Status(
+                                isBlocked = blockResult.isDisabled,
+                                confidence = blockResult.confidence,
+                                hasPhoto = true
+                            )
                         } else {
                             Logger.error("Camera1 API: Failed to decode photo data")
-                            onPhotoTaken(false, null)
+                            stateFlow.value = stateFlow.value.copy(hasPhoto = false)
                         }
                     } else {
                         Logger.error("Camera1 API: Photo data is null or empty (privacy toggle may be enabled)")
-                        onPhotoTaken(true, null) // Likely blocked if no data
+                        stateFlow.value = Camera1Status(isBlocked = true, confidence = 0.95f, hasPhoto = false)
                     }
                 } catch (e: Exception) {
                     Logger.error("Camera1 API: Failed to save photo: ${e.message}")
-                    onPhotoTaken(false, null)
+                    stateFlow.value = stateFlow.value.copy(hasPhoto = false)
                 } finally {
                     try {
                         camera.stopPreview()
@@ -751,18 +774,20 @@ class Camera1Manager(context: Context) {
             when (e.message) {
                 "Fail to connect to camera service" -> {
                     Logger.camera("Camera1 API: Failed to connect to camera service - possibly blocked")
-                    onPhotoTaken(true, null)
+                    stateFlow.value = Camera1Status(isBlocked = true, confidence = 0.90f, hasPhoto = false)
                 }
 
                 else -> {
                     Logger.error("Camera1 API: ${e.message}")
-                    onPhotoTaken(false, null)
+                    stateFlow.value = stateFlow.value.copy(hasPhoto = false)
                 }
             }
+
             false
         } catch (e: Exception) {
             Logger.error("Camera1 API: ${e.message}")
-            onPhotoTaken(false, null)
+            stateFlow.value = stateFlow.value.copy(hasPhoto = false)
+
             false
         }
     }
@@ -783,6 +808,7 @@ class Camera1Manager(context: Context) {
         if (photoFile.exists()) {
             photoFile.delete()
             Logger.camera("Camera1 API: Photo deleted")
+            stateFlow.value = stateFlow.value.copy(hasPhoto = false)
         }
     }
 }
@@ -792,6 +818,9 @@ class Camera2Manager(private val context: Context) {
     private val photoFile = File(context.filesDir, "camera2_photo.webp")
     private var backgroundThread: HandlerThread? = null
     private var backgroundHandler: Handler? = null
+
+    private val stateFlow = MutableStateFlow(Camera2Status())
+    val statusFlow: StateFlow<Camera2Status> = stateFlow.asStateFlow()
 
     private fun Bitmap.isSamePixelRepeated(): Boolean {
         if (width == 0 || height == 0) return false
@@ -808,7 +837,7 @@ class Camera2Manager(private val context: Context) {
     }
 
     @SuppressLint("MissingPermission")
-    fun takePhoto(onPhotoTaken: () -> Unit): Boolean {
+    fun takePhoto(): Boolean {
         return try {
             startBackgroundThread()
 
@@ -830,21 +859,27 @@ class Camera2Manager(private val context: Context) {
                         // Convert YUV image to bitmap
                         val bitmap = yuv420ToBitmap(image)
                         if (bitmap != null) {
-                            //logUniquePixels(bitmap)
-
                             val isCameraBlocked = bitmap.isSamePixelRepeated()
-                            if (isCameraBlocked)
-                                Logger.camera2("Camera2 API: Camera appears to be blocked by privacy toggle - repeated pixels detected")
 
                             savePhotoFile(bitmap, photoFile)
                             Logger.success("Camera2 API: Raw photo saved (${bitmap.width}x${bitmap.height})")
-                            onPhotoTaken()
-                        } else
+
+                            // Update status flow
+                            stateFlow.value = Camera2Status(
+                                isBlocked = isCameraBlocked,
+                                hasPhoto = true
+                            )
+                        } else {
                             Logger.error("Camera2 API: Failed to convert YUV to bitmap")
-                    } else
+                            stateFlow.value = stateFlow.value.copy(hasPhoto = false)
+                        }
+                    } else {
                         Logger.error("Camera2 API: Image is null (privacy toggle may be enabled)")
+                        stateFlow.value = Camera2Status(isBlocked = true, hasPhoto = false)
+                    }
                 } catch (e: Exception) {
                     Logger.error("Camera2 API: Failed to process image: ${e.message}")
+                    stateFlow.value = stateFlow.value.copy(hasPhoto = false)
                 } finally {
                     image?.close()
                 }
@@ -920,6 +955,11 @@ class Camera2Manager(private val context: Context) {
                         else -> "Unknown error ($error)"
                     }
                     Logger.error("Camera2 API: $errorMessage")
+
+                    // Update status for camera disabled error
+                    if (error == ERROR_CAMERA_DISABLED)
+                        stateFlow.value = Camera2Status(isBlocked = true, hasPhoto = false)
+
                     camera.close()
                     reader.close()
                     stopBackgroundThread()
@@ -938,6 +978,11 @@ class Camera2Manager(private val context: Context) {
             }
 
             Logger.error("Camera2 API: CameraAccessException - $reason")
+
+            // Update status for camera disabled
+            if (e.reason == CameraAccessException.CAMERA_DISABLED)
+                stateFlow.value = Camera2Status(isBlocked = true, hasPhoto = false)
+
             stopBackgroundThread()
 
             false
@@ -970,6 +1015,7 @@ class Camera2Manager(private val context: Context) {
         if (photoFile.exists()) {
             photoFile.delete()
             Logger.camera2("Photo deleted")
+            stateFlow.value = stateFlow.value.copy(hasPhoto = false)
         }
     }
 
@@ -1488,8 +1534,10 @@ fun RecordingMonitorScreen(
 
     var mediaRecorderState by remember { mutableStateOf(false) }
     var audioRecordState by remember { mutableStateOf(false) }
-    var camera1HasPhoto by remember { mutableStateOf(camera1Manager.hasPhoto()) }
-    var camera2HasPhoto by remember { mutableStateOf(camera2Manager.hasPhoto()) }
+
+    val camera1Status by camera1Manager.statusFlow.collectAsState()
+    val camera2Status by camera2Manager.statusFlow.collectAsState()
+
     var showCamera1Photo by remember { mutableStateOf(false) }
     var showCamera2Photo by remember { mutableStateOf(false) }
 
@@ -1507,7 +1555,9 @@ fun RecordingMonitorScreen(
             audioSystemState = audioSystemState,
             onOpenPermissionsMenu = onOpenPermissionsMenu,
             micSupport = micSupport,
-            camSupport = camSupport
+            camSupport = camSupport,
+            camera1Status = camera1Status,
+            camera2Status = camera2Status
         )
 
         Spacer(modifier = Modifier.height(16.dp))
@@ -1544,25 +1594,15 @@ fun RecordingMonitorScreen(
 
         // Camera Test Controls
         CameraTestCard(
-            camera1HasPhoto = camera1HasPhoto,
-            camera2HasPhoto = camera2HasPhoto,
+            camera1HasPhoto = camera1Status.hasPhoto,
+            camera2HasPhoto = camera2Status.hasPhoto,
 
             onCamera1TakePhoto = {
-                camera1Manager.takePhoto { isBlocked, blockResult ->
-                    if (isBlocked)
-                        if (blockResult != null)
-                            Logger.camera("Camera appears to be blocked by privacy toggle: ${blockResult.confidence * 100}% confidence.")
-                        else
-                            Logger.camera("Camera access is restricted.")
-
-                    camera1HasPhoto = camera1Manager.hasPhoto()
-                }
+                camera1Manager.takePhoto()
             },
 
             onCamera2TakePhoto = {
-                camera2Manager.takePhoto {
-                    camera2HasPhoto = camera2Manager.hasPhoto()
-                }
+                camera2Manager.takePhoto()
             },
 
             onCamera1ShowPhoto = {
@@ -1641,7 +1681,9 @@ fun SystemStatusCard(
     audioSystemState: AudioSystemState,
     onOpenPermissionsMenu: () -> Unit,
     micSupport: List<PrivacySensors.MicTogglePresent>,
-    camSupport: List<PrivacySensors.CamTogglePresent>
+    camSupport: List<PrivacySensors.CamTogglePresent>,
+    camera1Status: Camera1Status,
+    camera2Status: Camera2Status
 ) {
     val context = LocalContext.current
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -1741,11 +1783,103 @@ fun SystemStatusCard(
                 )
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(4.dp))
 
-            Text(audioSystemState.audioMode)
+            Text(audioSystemState.audioMode, style = MaterialTheme.typography.bodySmall)
+
+            Spacer(modifier = Modifier.height(4.dp))
+
             Text(audioSystemState.clientSilencedStatus)
             Text(audioSystemState.ownedRecordingsStatus)
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Camera status row
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceAround,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Camera1 status
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text("Camera1 API:")
+
+                    if (camera1Status.isBlocked != null)
+                        Icon(
+                            imageVector = if (camera1Status.isBlocked) LineAwesomeIcons.TimesCircle else LineAwesomeIcons.CheckCircle,
+                            contentDescription = if (camera1Status.isBlocked) "Camera1 blocked" else "Camera1 not blocked",
+                            tint = if (camera1Status.isBlocked) Color.Red else Color(0xFF4CAF50),
+                            modifier = Modifier
+                                .size(20.dp)
+                                .clickable {
+                                    Toast.makeText(context, if (camera1Status.isBlocked == true) "Camera1 blocked" else "Camera1 not blocked", Toast.LENGTH_SHORT).show()
+                                }
+                        )
+                    else
+                        Icon(
+                            imageVector = LineAwesomeIcons.QuestionCircle,
+                            contentDescription = "Camera1 status unknown",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier
+                                .size(20.dp)
+                                .clickable {
+                                    Toast.makeText(context, "Take photo with Camera1 to get status", Toast.LENGTH_SHORT).show()
+                                }
+                        )
+
+                    if (camera1Status.isBlocked != null && camera1Status.isBlocked == true)
+                        Text(
+                            text = "${(camera1Status.confidence * 100).toInt()}%",
+                            color = Color.Red,
+                            modifier = Modifier
+                                .clickable {
+                                    Toast.makeText(context, "Confidence: ${(camera1Status.confidence * 100).toInt()}%", Toast.LENGTH_SHORT).show()
+                                }
+                        )
+                }
+
+                // Visual separator
+                Box(
+                    modifier = Modifier
+                        .width(1.dp)
+                        .height(28.dp)
+                        .background(MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+                )
+
+                // Camera2 status
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text("Camera2 API:")
+
+                    if (camera2Status.isBlocked != null)
+                        Icon(
+                            imageVector = if (camera2Status.isBlocked) LineAwesomeIcons.TimesCircle else LineAwesomeIcons.CheckCircle,
+                            contentDescription = if (camera2Status.isBlocked) "Camera2 blocked" else "Camera2 not blocked",
+                            tint = if (camera2Status.isBlocked) Color.Red else Color(0xFF4CAF50),
+                            modifier = Modifier
+                                .size(20.dp)
+                                .clickable {
+                                    Toast.makeText(context, if (camera2Status.isBlocked == true) "Camera2 blocked" else "Camera2 not blocked", Toast.LENGTH_SHORT).show()
+                                }
+                        )
+                    else
+                        Icon(
+                            imageVector = LineAwesomeIcons.QuestionCircle,
+                            contentDescription = "Camera2 status unknown",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier
+                                .size(20.dp)
+                                .clickable {
+                                    Toast.makeText(context, "Take photo with Camera2 to get status", Toast.LENGTH_SHORT).show()
+                                }
+                        )
+                }
+            }
         }
     }
 }
