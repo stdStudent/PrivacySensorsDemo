@@ -68,6 +68,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -91,6 +92,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -104,6 +106,7 @@ import compose.icons.lineawesomeicons.FilmSolid
 import compose.icons.lineawesomeicons.Image
 import compose.icons.lineawesomeicons.MicrochipSolid
 import compose.icons.lineawesomeicons.QuestionCircle
+import compose.icons.lineawesomeicons.QuestionSolid
 import compose.icons.lineawesomeicons.TimesCircle
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -1773,7 +1776,8 @@ fun SystemStatusCard(
                     support = micSupport,
                     toggleTypeIcons = mapOf(
                         PrivacySensors.MicTogglePresent.HARDWARE to LineAwesomeIcons.MicrochipSolid,
-                        PrivacySensors.MicTogglePresent.SOFTWARE to LineAwesomeIcons.Android
+                        PrivacySensors.MicTogglePresent.SOFTWARE to LineAwesomeIcons.Android,
+                        PrivacySensors.MicTogglePresent.ANY to LineAwesomeIcons.QuestionSolid
                     ),
                     onClick = {
                         val message = when {
@@ -1805,7 +1809,8 @@ fun SystemStatusCard(
                     support = camSupport,
                     toggleTypeIcons = mapOf(
                         PrivacySensors.CamTogglePresent.HARDWARE to LineAwesomeIcons.MicrochipSolid,
-                        PrivacySensors.CamTogglePresent.SOFTWARE to LineAwesomeIcons.Android
+                        PrivacySensors.CamTogglePresent.SOFTWARE to LineAwesomeIcons.Android,
+                        PrivacySensors.CamTogglePresent.ANY to LineAwesomeIcons.QuestionSolid
                     ),
                     onClick = {
                         val message = when {
@@ -1840,32 +1845,36 @@ fun SystemStatusCard(
             Spacer(modifier = Modifier.height(4.dp))
 
             // Coloured recording count
-            Text(buildAnnotatedString {
-                withStyle(style = SpanStyle(color = Color(0xFFD32F2F))) {
-                    append(audioSystemState.recordingSummary.first.toString())
-                }
-                append("/")
-                withStyle(style = SpanStyle(color = Color(0xFF388E3C))) {
-                    append(audioSystemState.recordingSummary.second.toString())
-                }
-                append("/")
-                withStyle(style = SpanStyle(color = Color(0xFF1976D2))) {
-                    append("${audioSystemState.recordingSummary.third}")
-                }
-                append("   :   ")
-                withStyle(style = SpanStyle(color = Color(0xFFD32F2F))) {
-                    append("silenced")
-                }
-                append("/")
-                withStyle(style = SpanStyle(color = Color(0xFF388E3C))) {
-                    append("own")
-                }
-                append("/")
-                withStyle(style = SpanStyle(color = Color(0xFF1976D2))) {
-                    append("total")
-                }
-                append(" recordings")
-            })
+            Text(
+                buildAnnotatedString {
+                    withStyle(style = SpanStyle(color = Color(0xFFD32F2F))) {
+                        append(audioSystemState.recordingSummary.first.toString())
+                    }
+                    append("/")
+                    withStyle(style = SpanStyle(color = Color(0xFF388E3C))) {
+                        append(audioSystemState.recordingSummary.second.toString())
+                    }
+                    append("/")
+                    withStyle(style = SpanStyle(color = Color(0xFF1976D2))) {
+                        append("${audioSystemState.recordingSummary.third}")
+                    }
+                    append("  :  ")
+                    withStyle(style = SpanStyle(color = Color(0xFFD32F2F))) {
+                        append("silenced")
+                    }
+                    append("/")
+                    withStyle(style = SpanStyle(color = Color(0xFF388E3C))) {
+                        append("own")
+                    }
+                    append("/")
+                    withStyle(style = SpanStyle(color = Color(0xFF1976D2))) {
+                        append("total")
+                    }
+                    append(" recordings")
+                },
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
 
             Spacer(modifier = Modifier.height(8.dp))
 
@@ -2048,12 +2057,34 @@ fun TestRecordingCard(
             Spacer(modifier = Modifier.height(8.dp))
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onMediaRecorderToggle) {
-                    Text(if (mediaRecorderState) "Stop MediaRecorder" else "Start MediaRecorder")
+                Button(
+                    onClick = onMediaRecorderToggle,
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (mediaRecorderState) Color(0xFFD32F2F) else MaterialTheme.colorScheme.primary
+                    )
+                ) {
+                    Text(
+                        text = if (mediaRecorderState) "Stop MediaRecorder" else "Start MediaRecorder",
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
 
-                Button(onClick = onAudioRecordToggle) {
-                    Text(if (audioRecordState) "Stop AudioRecord" else "Start AudioRecord")
+                Button(
+                    onClick = onAudioRecordToggle,
+                    modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (audioRecordState) Color(0xFFD32F2F) else MaterialTheme.colorScheme.primary
+                    )
+                ) {
+                    Text(
+                        text = if (audioRecordState) "Stop AudioRecord" else "Start AudioRecord",
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
             }
         }
